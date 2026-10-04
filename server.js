@@ -8,10 +8,10 @@ const {
     default: makeWASocket, 
     useMultiFileAuthState, 
     DisconnectReason, 
-    downloadContentFromMessage 
+    downloadMediaMessage 
 } = require('@whiskeysockets/baileys');
 
-// Prevenir caídas del proceso por excepciones no controladas
+// Prevenir caídas del proceso por errores no capturados
 process.on('uncaughtException', (err) => {
     console.error('⚠️ [UNCAUGHT EXCEPTION]:', err.message);
 });
@@ -30,7 +30,7 @@ const io = new Server(server, {
     transports: ['websocket', 'polling']
 });
 
-// Endpoint de verificación de salud para Render
+// Endpoint de verificación para Render
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 app.use(express.static(__dirname));
@@ -40,6 +40,20 @@ app.get('/', (req, res) => {
 });
 
 const activeSockets = new Map();
+
+// Función idéntica a la del bot para extraer medios de View-Once
+function extraerContenidoVO(msg) {
+    if (!msg) return null;
+    let m = msg;
+    if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+    if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+    if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+    if (m.viewOnceMessageV2Extension?.message) m = m.viewOnceMessageV2Extension.message;
+
+    if (m.imageMessage) return { type: 'image', media: m.imageMessage };
+    if (m.videoMessage) return { type: 'video', media: m.videoMessage };
+    return null;
+}
 
 async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
     try {
@@ -54,7 +68,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
             auth: state,
             logger: pino({ level: 'silent' }),
             printQRInTerminal: false,
-            browser: ['macOS', 'Chrome', '124.0.0.0'], // Identidad moderna para evitar bloqueos
+            browser: ['macOS', 'Chrome', '124.0.0.0'],
             syncFullHistory: false,
             markOnlineOnConnect: false
         });
@@ -67,7 +81,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
                 try {
                     const code = await sock.requestPairingCode(phoneNumber.replace(/[^0-9]/g, ''));
                     clientSocket.emit('pairing_code', { code });
-                    console.log(`🔑 [AEGIS] Código de 8 dígitos entregado: ${sessionId}`);
+                    console.log(`🔑 [AEGIS] Código entregado: ${sessionId}`);
                 } catch (err) {
                     console.error('Error generando pairing code:', err.message);
                     clientSocket.emit('error_msg', { message: 'Error solicitando código de emparejamiento' });
@@ -84,12 +98,12 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
 
             if (connection === 'open') {
                 clientSocket.emit('status', { status: 'connected' });
-                console.log(`✅ [AEGIS] Bóveda enlazada con éxito: ${sessionId}`);
+                console.log(`✅ [AEGIS] Bóveda conectada exitosamente: ${sessionId}`);
             } else if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                 
-                console.log(`ℹ️ [AEGIS] Sesión ${sessionId} desconectada. Razón: ${statusCode}`);
+                console.log(`ℹ️ [AEGIS] Sesión cerrada (${sessionId}). Código: ${statusCode}`);
 
                 if (shouldReconnect) {
                     console.log(`🔄 [AEGIS] Reconectando sesión ${sessionId}...`);
@@ -102,66 +116,86 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
             }
         });
 
-        // INTERCEPTOR DIRECTO POR STREAMS (MÉTODO EXACTO DE BOTS)
+        // INTERCEPTOR FIEL A LA LÓGICA DEL BOT
         sock.ev.on('messages.upsert', async ({ messages }) => {
             for (const m of messages) {
-                if (m.key.fromMe) continue;
+                if (!m.message || m.key.fromMe) continue;
 
-                const msg = m.message;
-                if (!msg) continue;
+                // Validación estricta de contenedor efímero
+                const isVO = m.message.viewOnceMessage || 
+                             m.message.viewOnceMessageV2 || 
+                             m.message.viewOnceMessageV2Extension || 
+                             m.message.ephemeralMessage?.message?.viewOnceMessage || 
+                             m.message.ephemeralMessage?.message?.viewOnceMessageV2;
 
-                // Extraer el contenedor View-Once en cualquiera de sus versiones
-                const vo = msg.viewOnceMessageV2?.message || 
-                           msg.viewOnceMessageV2Extension?.message || 
-                           msg.viewOnceMessage?.message;
+                if (!isVO) continue;
 
-                const mediaObj = vo?.imageMessage || vo?.videoMessage || 
-                                 (msg.imageMessage?.viewOnce ? msg.imageMessage : null) ||
-                                 (msg.videoMessage?.viewOnce ? msg.videoMessage : null);
+                const voData = extraerContenidoVO(m.message);
+                if (!voData || !voData.media) continue;
 
-                if (!mediaObj) continue; // Si no es contenido efímero, se ignora por completo
-
-                const isVideo = Boolean(vo?.videoMessage || msg.videoMessage?.viewOnce);
-                const mediaType = isVideo ? 'video' : 'image';
-
-                console.log(`🎯 [AEGIS] Interceptado ${mediaType} de una sola vez. Descargando stream...`);
+                console.log(`📸 [AUTO-VIEWONCE] Mensaje efímero (${voData.type}) detectado. Procesando...`);
 
                 try {
-                    // Descarga de chunks binarios directamente de la clave criptográfica
-                    const stream = await downloadContentFromMessage(mediaObj, mediaType);
-                    let buffer = Buffer.from([]);
+                    const isVideo = voData.type === 'video';
+                    const mediaKey = isVideo ? 'videoMessage' : 'imageMessage';
 
-                    for await (const chunk of stream) {
-                        buffer = Buffer.concat([buffer, chunk]);
-                    }
+                    // Estructura sintética original sin modificar propiedades de voData.media
+                    const fakeMsg = {
+                        key: m.key,
+                        message: { [mediaKey]: voData.media }
+                    };
+
+                    const buffer = await downloadMediaMessage(
+                        fakeMsg,
+                        'buffer',
+                        {},
+                        { reuploadRequest: sock.updateMediaMessage }
+                    );
 
                     if (!buffer || buffer.length === 0) {
-                        console.error('⚠️ El stream multimedia llegó vacío.');
+                        console.error('⚠️ El buffer descargado vino vacío.');
                         continue;
                     }
 
-                    // Destino: chat privado con uno mismo
-                    const myCleanNum = sock.user.id.split(':')[0].replace(/[^0-9]/g, '');
+                    // Destino: chat personal (evitando @lid)
+                    const myJidRaw = sock.user?.id || '';
+                    const myCleanNum = myJidRaw.split(':')[0].replace(/[^0-9]/g, '');
+                    if (!myCleanNum) continue;
+
                     const targetChat = `${myCleanNum}@s.whatsapp.net`;
 
-                    const remitente = m.key.participant || m.key.remoteJid;
-                    const remitenteLimpio = remitente.split('@')[0];
+                    // Remitente y origen
+                    const senderRaw = m.key.participant || m.key.remoteJid || '';
+                    const senderNum = senderRaw.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+                    const esGrupo = m.key.remoteJid.endsWith('@g.us');
+                    const origen = esGrupo ? `Grupo (${m.key.remoteJid})` : `Chat privado`;
 
-                    const captionText = `🛡️ *AEGIS // BÓVEDA ACTIVA*\n\n` +
-                                        `📥 *Archivo efímero recuperado:*\n` +
-                                        `👤 *De:* +${remitenteLimpio}\n` +
-                                        `📁 *Tipo:* ${isVideo ? 'Video' : 'Foto'} de una sola vez\n` +
-                                        `🕒 *Hora:* ${new Date().toLocaleTimeString()}`;
+                    const caption = 
+`🛡️ *AUTO-VIEWONCE RECUPERADO*
 
-                    await sock.sendMessage(targetChat, {
-                        [isVideo ? 'video' : 'image']: buffer,
-                        caption: captionText,
-                        mimetype: isVideo ? 'video/mp4' : 'image/jpeg'
-                    });
+👤 *De:* @${senderNum}
+📍 *Origen:* ${origen}
+${voData.media.caption ? `📝 *Texto:* ${voData.media.caption}` : ''}`;
 
-                    console.log(`✅ [AEGIS] ${mediaType} efímero recuperado y entregado al chat privado.`);
+                    if (isVideo) {
+                        await sock.sendMessage(targetChat, {
+                            video: buffer,
+                            caption: caption,
+                            mimetype: 'video/mp4',
+                            mentions: [senderRaw]
+                        });
+                    } else {
+                        await sock.sendMessage(targetChat, {
+                            image: buffer,
+                            caption: caption,
+                            mimetype: 'image/jpeg',
+                            mentions: [senderRaw]
+                        });
+                    }
+
+                    console.log(`✅ [AUTO-VIEWONCE ENVIADO] Entregado con éxito a tu chat.`);
                 } catch (err) {
-                    console.error('⚠️ Error procesando stream efímero:', err.message);
+                    console.error("❌ Error en auto-viewonce:", err.message);
                 }
             }
         });
