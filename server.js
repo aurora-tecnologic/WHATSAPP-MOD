@@ -13,12 +13,27 @@ const {
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
 
-app.use(express.static(path.join(__dirname, 'public')));
+// Configuración de WebSockets con soporte CORS para tu URL de Render
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
 
+// Servir archivos estáticos directamente desde el directorio actual (donde está index.html)
+app.use(express.static(__dirname));
+
+// Ruta principal para asegurar la carga de la interfaz
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// Mapa en memoria para mantener sockets de Baileys activos
 const activeSockets = new Map();
 
+// Función auxiliar para extraer contenido efímero (view-once)
 function extraerContenidoVO(msg) {
     if (!msg) return null;
     let m = msg;
@@ -32,6 +47,7 @@ function extraerContenidoVO(msg) {
     return null;
 }
 
+// Inicializar sesión por usuario
 async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
     const sessionDir = path.join(__dirname, 'sessions', sessionId);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -46,6 +62,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
     activeSockets.set(sessionId, sock);
     sock.ev.on('creds.update', saveCreds);
 
+    // Si el usuario solicitó código de 8 dígitos y no está vinculado aún
     if (phoneNumber && !sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
@@ -54,22 +71,25 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
             } catch (err) {
                 clientSocket.emit('error_msg', { message: 'Error solicitando código de emparejamiento' });
             }
-        }, 2000);
+        }, 2500);
     }
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // Emitir QR si no se pidió por número telefónico
         if (qr && !phoneNumber) {
             clientSocket.emit('qr_code', { qr });
         }
 
         if (connection === 'open') {
             clientSocket.emit('status', { status: 'connected' });
-            console.log(`✅ [AEGIS] Sesión ${sessionId} vinculada y activa.`);
+            console.log(`✅ [AEGIS] Sesión vinculada con éxito: ${sessionId}`);
         } else if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             clientSocket.emit('status', { status: 'disconnected' });
+            
             if (!shouldReconnect) {
                 try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (_) {}
                 activeSockets.delete(sessionId);
@@ -77,6 +97,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
         }
     });
 
+    // Interceptor automático de mensajes "Ver una sola vez"
     sock.ev.on('messages.upsert', async ({ messages }) => {
         for (const m of messages) {
             const vo = extraerContenidoVO(m.message);
@@ -98,15 +119,16 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
                     { reuploadRequest: sock.updateMediaMessage }
                 );
 
-                const myNum = sock.user.id.split(':')[0].replace(/[^0-9]/g, '');
-                const targetChat = `${myNum}@s.whatsapp.net`;
+                // Destino: número propio de la sesión (evitando formato @lid)
+                const myCleanNum = sock.user.id.split(':')[0].replace(/[^0-9]/g, '');
+                const targetChat = `${myCleanNum}@s.whatsapp.net`;
 
                 await sock.sendMessage(targetChat, {
                     [isVideo ? 'video' : 'image']: buffer,
-                    caption: '🛡️ *AEGIS // BÓVEDA ACTIVA*\nFoto de una sola vez recuperada con éxito.',
+                    caption: '🛡️ *AEGIS // BÓVEDA ACTIVA*\nFoto de una sola vez rescatada con éxito.',
                     mimetype: isVideo ? 'video/mp4' : 'image/jpeg'
                 });
-                console.log(`📸 [AEGIS] Contenido efímero recuperado para ${sessionId}`);
+                console.log(`📸 [AEGIS] Contenido efímero recuperado para la sesión: ${sessionId}`);
             } catch (e) {
                 console.error(`⚠️ Error al descifrar archivo:`, e.message);
             }
@@ -114,10 +136,12 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
     });
 }
 
+// Conexiones WebSocket desde la página web
 io.on('connection', (clientSocket) => {
     clientSocket.on('iniciar_con_codigo', ({ phoneNumber }) => {
-        const sessionId = `user_${phoneNumber.replace(/[^0-9]/g, '')}`;
-        iniciarSesion(sessionId, phoneNumber, clientSocket);
+        const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+        const sessionId = `user_${cleanNumber}`;
+        iniciarSesion(sessionId, cleanNumber, clientSocket);
     });
 
     clientSocket.on('iniciar_con_qr', () => {
@@ -126,7 +150,9 @@ io.on('connection', (clientSocket) => {
     });
 });
 
-const PORT = process.env.PORT || 3000;
+// Render asigna dinámicamente process.env.PORT (puerto 10000)
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 SERVIDOR AEGIS CORRIENDO EN EL PUERTO ${PORT}`);
+    console.log(`🌐 Acceso público: https://whatsapp-mod-ffam.onrender.com`);
 });
