@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AEGIS // VIEW-ONCE VAULT</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800;900&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;600;800&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  
+  <!-- Conexión en tiempo real y renderizador de QR oficial -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg-abyss: #030712;
+      --bg-deep: #070a13;
+      --neon-green: #10b981;
+      --neon-green-bright: #00ff88;
+      --laser-cyan: #06b6d4;
+      --laser-cyan-bright: #00f0ff;
+      --hologram-violet: #8b5cf6;
+      --glass-border: rgba(16, 185, 129, 0.25);
+      --glass-bg: rgba(7, 10, 19, 0.65);
+      --glow-green: 0 0 12px rgba(16, 185, 129, 0.7), 0 0 30px rgba(0, 255, 136, 0.4);
+      --glow-cyan: 0 0 12px rgba(6, 182, 212, 0.7), 0 0 30px rgba(0, 240, 255, 0.4);
+      --font-display: 'Orbitron', 'Space Grotesk', sans-serif;
+      --font-mono: 'JetBrains Mono', 'Share Tech Mono', monospace;
+      --font-ui: 'Space Grotesk', 'Syne', sans-serif;
+      --transition-smooth: cubic-bezier(0.23, 1, 0.32, 1);
+    }
+
+    html, body {
+      width: 100%;
+      min-height: 100vh;
+      background-color: var(--bg-abyss);
+      color: #e2e8f0;
+      font-family: var(--font-ui);
+      overflow-x: hidden;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 24px 16px 60px;
+      position: relative;
+      background: radial-gradient(circle at 20% 10%, rgba(16, 185, 129, 0.08) 0%, transparent 45%),
+                  radial-gradient(circle at 80% 80%, rgba(6, 182, 212, 0.08) 0%, transparent 45%),
+                  radial-gradient(circle at 50% 50%, rgba(139, 92, 246, 0.04) 0%, transparent 60%),
+                  var(--bg-abyss);
+    }
+
+    #particle-canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.7;
+    }
+
+    .grid-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(16, 185, 129, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(16, 185, 129, 0.03) 1px, transparent 1px);
+      background-size: 60px 60px;
+      mask-image: radial-gradient(ellipse at 50% 50%, black 30%, transparent 80%);
+      -webkit-mask-image: radial-gradient(ellipse at 50% 50%, black 30%, transparent 80%);
+    }
+
+    .app-container {
+      position: relative;
+      z-index: 2;
+      width: 100%;
+      max-width: 880px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .glass-panel {
+      position: relative;
+      background: var(--glass-bg);
+      backdrop-filter: blur(24px) saturate(1.4);
+      -webkit-backdrop-filter: blur(24px) saturate(1.4);
+      border-radius: 24px;
+      border: 1px solid transparent;
+      background-clip: padding-box;
+      box-shadow:
+        0 8px 32px rgba(0, 0, 0, 0.6),
+        0 2px 8px rgba(0, 0, 0, 0.4),
+        inset 0 1px 0 rgba(255, 255, 255, 0.04),
+        inset 0 0 40px rgba(16, 185, 129, 0.03);
+      transition: box-shadow 0.4s var(--transition-smooth);
+    }
+
+    .glass-panel::before {
+      content: '';
+      position: absolute;
+      inset: -1px;
+      border-radius: 25px;
+      padding: 1px;
+      background: linear-gradient(135deg,
+        rgba(16, 185, 129, 0.5) 0%,
+        rgba(6, 182, 212, 0.3) 30%,
+        rgba(139, 92, 246, 0.2) 60%,
+        rgba(16, 185, 129, 0.4) 100%);
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .glass-panel:hover::before {
+      background: linear-gradient(135deg,
+        rgba(16, 185, 129, 0.8) 0%,
+        rgba(6, 182, 212, 0.6) 30%,
+        rgba(139, 92, 246, 0.4) 60%,
+        rgba(16, 185, 129, 0.7) 100%);
+    }
+
+    .header {
+      padding: 20px 24px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .reactor-emblem {
+      width: 64px;
+      height: 64px;
+      flex-shrink: 0;
+      filter: drop-shadow(0 0 12px rgba(16, 185, 129, 0.6));
+      animation: emblemPulse 3s ease-in-out infinite;
+    }
+
+    @keyframes emblemPulse {
+      0%, 100% { filter: drop-shadow(0 0 8px rgba(16, 185, 129, 0.5)); }
+      50% { filter: drop-shadow(0 0 20px rgba(0, 255, 136, 0.9)); }
+    }
+
+    .header-title {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .header-title h1 {
+      font-family: var(--font-display);
+      font-size: clamp(1rem, 3.5vw, 1.5rem);
+      font-weight: 800;
+      letter-spacing: 2px;
+      background: linear-gradient(90deg, #00ff88 0%, #00f0ff 50%, #8b5cf6 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-transform: uppercase;
+      line-height: 1.2;
+    }
+
+    .header-title .sub {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      letter-spacing: 3px;
+      color: rgba(16, 185, 129, 0.6);
+      text-transform: uppercase;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      border-radius: 40px;
+      background: rgba(16, 185, 129, 0.08);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      letter-spacing: 1.5px;
+      color: #00ff88;
+      text-transform: uppercase;
+      white-space: nowrap;
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.15);
+    }
+
+    .led {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #00ff88;
+      box-shadow: 0 0 8px #00ff88, 0 0 16px #00ff88;
+      animation: ledPulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes ledPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    .tab-switcher {
+      display: flex;
+      gap: 12px;
+      padding: 6px;
+      background: rgba(3, 7, 18, 0.7);
+      border-radius: 60px;
+      border: 1px solid rgba(16, 185, 129, 0.15);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 14px 18px;
+      border: none;
+      border-radius: 50px;
+      background: transparent;
+      color: rgba(226, 232, 240, 0.45);
+      font-family: var(--font-mono);
+      font-size: clamp(0.6rem, 2vw, 0.75rem);
+      font-weight: 600;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.4s var(--transition-smooth);
+      position: relative;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .tab-btn .tab-num {
+      color: rgba(16, 185, 129, 0.5);
+      margin-right: 6px;
+      font-weight: 800;
+    }
+
+    .tab-btn.active {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(6, 182, 212, 0.15));
+      color: #00ff88;
+      box-shadow:
+        0 0 20px rgba(16, 185, 129, 0.25),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+
+    .tab-btn.active .tab-num {
+      color: #00ff88;
+    }
+
+    .tab-btn:not(.active):hover {
+      color: rgba(226, 232, 240, 0.8);
+      background: rgba(16, 185, 129, 0.05);
+    }
+
+    .panel-container {
+      position: relative;
+    }
+
+    .panel {
+      display: none;
+      padding: 28px 24px;
+      animation: panelFadeIn 0.5s var(--transition-smooth);
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    @keyframes panelFadeIn {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .panel-title {
+      font-family: var(--font-display);
+      font-size: 0.85rem;
+      letter-spacing: 3px;
+      color: rgba(0, 240, 255, 0.7);
+      text-transform: uppercase;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .panel-title::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(90deg, rgba(0, 240, 255, 0.3), transparent);
+    }
+
+    .input-group {
+      position: relative;
+      margin-bottom: 20px;
+    }
+
+    .input-label {
+      position: absolute;
+      top: -9px;
+      left: 18px;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      letter-spacing: 2px;
+      color: rgba(16, 185, 129, 0.7);
+      background: var(--bg-deep);
+      padding: 0 8px;
+      text-transform: uppercase;
+      z-index: 2;
+    }
+
+    .input-field {
+      width: 100%;
+      padding: 18px 18px 18px 52px;
+      background: rgba(3, 7, 18, 0.6);
+      border: 1px solid rgba(16, 185, 129, 0.2);
+      border-radius: 16px;
+      color: #e2e8f0;
+      font-family: var(--font-mono);
+      font-size: 1rem;
+      letter-spacing: 1px;
+      transition: all 0.4s var(--transition-smooth);
+      outline: none;
+    }
+
+    .input-field:focus {
+      border-color: rgba(0, 255, 136, 0.6);
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.2), inset 0 0 20px rgba(16, 185, 129, 0.05);
+      background: rgba(3, 7, 18, 0.85);
+    }
+
+    .input-prefix {
+      position: absolute;
+      left: 18px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      color: rgba(16, 185, 129, 0.8);
+      font-weight: 600;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    .input-format-badge {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      letter-spacing: 1px;
+      color: rgba(6, 182, 212, 0.6);
+      background: rgba(6, 182, 212, 0.08);
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid rgba(6, 182, 212, 0.2);
+      pointer-events: none;
+    }
+
+    .btn-primary {
+      width: 100%;
+      padding: 18px 24px;
+      border: none;
+      border-radius: 50px;
+      background: linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #8b5cf6 100%);
+      background-size: 200% 200%;
+      color: #030712;
+      font-family: var(--font-display);
+      font-size: clamp(0.75rem, 2.5vw, 0.9rem);
+      font-weight: 800;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.5s var(--transition-smooth);
+      position: relative;
+      overflow: hidden;
+      box-shadow:
+        0 0 30px rgba(16, 185, 129, 0.3),
+        0 4px 16px rgba(0, 0, 0, 0.4),
+        inset 0 1px 0 rgba(255, 255, 255, 0.3);
+      animation: gradientShift 4s ease infinite;
+    }
+
+    @keyframes gradientShift {
+      0%, 100% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px) scale(1.01);
+      box-shadow:
+        0 0 50px rgba(16, 185, 129, 0.5),
+        0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .code-display-section {
+      margin-top: 28px;
+      display: none;
+    }
+
+    .code-display-section.visible {
+      display: block;
+      animation: panelFadeIn 0.6s var(--transition-smooth);
+    }
+
+    .code-label {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      letter-spacing: 3px;
+      color: rgba(0, 240, 255, 0.6);
+      text-transform: uppercase;
+      margin-bottom: 14px;
+      text-align: center;
+    }
+
+    .code-blocks {
+      display: flex;
+      justify-content: center;
+      gap: clamp(4px, 1.5vw, 10px);
+      margin-bottom: 18px;
+    }
+
+    .code-block {
+      width: clamp(36px, 9vw, 56px);
+      height: clamp(48px, 12vw, 72px);
+      background: rgba(3, 7, 18, 0.8);
+      border: 1px solid rgba(0, 255, 136, 0.4);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: clamp(1.4rem, 5vw, 2rem);
+      font-weight: 800;
+      color: #00ff88;
+      text-shadow: 0 0 12px rgba(0, 255, 136, 0.8);
+      box-shadow: 0 0 15px rgba(16, 185, 129, 0.2);
+      animation: codeBlockAppear 0.4s var(--transition-smooth) both;
+    }
+
+    @keyframes codeBlockAppear {
+      from { opacity: 0; transform: scale(0.7) rotateX(40deg); }
+      to { opacity: 1; transform: scale(1) rotateX(0deg); }
+    }
+
+    .code-actions {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+    }
+
+    .btn-secondary {
+      padding: 12px 24px;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      border-radius: 50px;
+      background: rgba(16, 185, 129, 0.08);
+      color: #00ff88;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.3s var(--transition-smooth);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: rgba(0, 255, 136, 0.8);
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+    }
+
+    .qr-scanner-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .qr-frame {
+      position: relative;
+      width: min(280px, 70vw);
+      height: min(280px, 70vw);
+      border-radius: 20px;
+      background: #030712;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      box-shadow: 0 0 40px rgba(6, 182, 212, 0.15);
+    }
+
+    .qr-corner-tl, .qr-corner-tr, .qr-corner-bl, .qr-corner-br {
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      border-color: #00f0ff;
+      border-style: solid;
+      pointer-events: none;
+      z-index: 5;
+      filter: drop-shadow(0 0 6px rgba(0, 240, 255, 0.8));
+    }
+
+    .qr-corner-tl { top: 12px; left: 12px; border-width: 2px 0 0 2px; border-top-left-radius: 8px; }
+    .qr-corner-tr { top: 12px; right: 12px; border-width: 2px 2px 0 0; border-top-right-radius: 8px; }
+    .qr-corner-bl { bottom: 12px; left: 12px; border-width: 0 0 2px 2px; border-bottom-left-radius: 8px; }
+    .qr-corner-br { bottom: 12px; right: 12px; border-width: 0 2px 2px 0; border-bottom-right-radius: 8px; }
+
+    #qrCanvasTarget {
+      z-index: 3;
+      border-radius: 12px;
+      max-width: 80%;
+      max-height: 80%;
+      background: #ffffff;
+      padding: 6px;
+    }
+
+    .scan-line {
+      position: absolute;
+      left: 6%;
+      width: 88%;
+      height: 3px;
+      background: linear-gradient(90deg, transparent, #00f0ff, #00ff88, #00f0ff, transparent);
+      box-shadow: 0 0 20px #00f0ff, 0 0 40px rgba(0, 240, 255, 0.5);
+      z-index: 4;
+      animation: scanMove 2.5s ease-in-out infinite;
+      border-radius: 2px;
+      pointer-events: none;
+    }
+
+    @keyframes scanMove {
+      0%, 100% { top: 8%; }
+      50% { top: 90%; }
+    }
+
+    .qr-loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(3, 7, 18, 0.85);
+      backdrop-filter: blur(4px);
+      z-index: 10;
+      transition: opacity 0.3s ease;
+    }
+
+    .qr-loading.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 2px solid rgba(0, 240, 255, 0.15);
+      border-top-color: #00f0ff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .btn-refresh {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 28px;
+      border: 1px solid rgba(6, 182, 212, 0.4);
+      border-radius: 50px;
+      background: rgba(6, 182, 212, 0.06);
+      color: #00f0ff;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.3s var(--transition-smooth);
+    }
+
+    .btn-refresh:hover {
+      background: rgba(6, 182, 212, 0.15);
+      border-color: rgba(0, 240, 255, 0.8);
+      box-shadow: 0 0 25px rgba(6, 182, 212, 0.3);
+    }
+
+    .success-panel {
+      display: none;
+      padding: 40px 24px;
+      text-align: center;
+      animation: panelFadeIn 0.6s var(--transition-smooth);
+    }
+
+    .success-panel.visible {
+      display: block;
+    }
+
+    .success-icon {
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 24px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(16, 185, 129, 0.2), transparent 70%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: successPulse 2s ease-in-out infinite;
+      border: 2px solid rgba(0, 255, 136, 0.5);
+    }
+
+    @keyframes successPulse {
+      0%, 100% { box-shadow: 0 0 20px rgba(0, 255, 136, 0.3); transform: scale(1); }
+      50% { box-shadow: 0 0 40px rgba(0, 255, 136, 0.6); transform: scale(1.05); }
+    }
+
+    .success-title {
+      font-family: var(--font-display);
+      font-size: clamp(1.1rem, 3vw, 1.5rem);
+      font-weight: 800;
+      letter-spacing: 3px;
+      background: linear-gradient(90deg, #00ff88, #00f0ff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .success-subtitle {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      letter-spacing: 2px;
+      color: rgba(16, 185, 129, 0.7);
+      text-transform: uppercase;
+      margin-bottom: 32px;
+    }
+
+    .vault-activity {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      max-width: 440px;
+      margin: 0 auto;
+    }
+
+    .activity-item {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 18px;
+      background: rgba(3, 7, 18, 0.6);
+      border: 1px solid rgba(16, 185, 129, 0.15);
+      border-radius: 14px;
+      text-align: left;
+    }
+
+    .activity-text .label {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: rgba(226, 232, 240, 0.5);
+      text-transform: uppercase;
+    }
+
+    .activity-text .value {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: #00f0ff;
+      font-weight: 600;
+    }
+
+    .activity-status {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      color: #00ff88;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: rgba(0, 255, 136, 0.08);
+      border: 1px solid rgba(0, 255, 136, 0.25);
+      margin-left: auto;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      padding: 14px 28px;
+      background: rgba(3, 7, 18, 0.95);
+      border: 1px solid rgba(0, 255, 136, 0.5);
+      border-radius: 50px;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      letter-spacing: 1.5px;
+      color: #00ff88;
+      text-transform: uppercase;
+      box-shadow: 0 0 30px rgba(16, 185, 129, 0.3);
+      z-index: 1000;
+      opacity: 0;
+      transition: all 0.4s var(--transition-smooth);
+      white-space: nowrap;
+    }
+
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+
+    @media (max-width: 640px) {
+      .header-title h1 { font-size: 0.9rem; }
+      .tab-switcher { flex-direction: column; }
+      .code-blocks { gap: 4px; }
+      .code-block { width: 34px; height: 46px; font-size: 1.25rem; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="particle-canvas"></canvas>
+  <div class="grid-overlay"></div>
+
+  <div class="app-container">
+    <!-- Header con Reactor View-Once -->
+    <header class="glass-panel header">
+      <div class="header-left">
+        <svg class="reactor-emblem" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00ff88"/>
+              <stop offset="50%" stop-color="#00f0ff"/>
+              <stop offset="100%" stop-color="#8b5cf6"/>
+            </linearGradient>
+            <linearGradient id="innerGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#10b981"/>
+              <stop offset="100%" stop-color="#06b6d4"/>
+            </linearGradient>
+            <filter id="glow">
+              <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+              <feMerge>
+                <feMergeNode in="coloredBlur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+          </defs>
+          <circle cx="50" cy="50" r="42" stroke="url(#ringGrad)" stroke-width="1.5" stroke-dasharray="8 6" fill="none" opacity="0.8">
+            <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="20s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="50" cy="50" r="36" stroke="url(#ringGrad)" stroke-width="0.8" stroke-dasharray="4 8" fill="none" opacity="0.5">
+            <animateTransform attributeName="transform" type="rotate" from="360 50 50" to="0 50 50" dur="15s" repeatCount="indefinite"/>
+          </circle>
+          <path d="M50 22 L66 30 L66 50 C66 62 58 70 50 76 C42 70 34 62 34 50 L34 30 Z" stroke="url(#innerGrad)" stroke-width="2" fill="rgba(16,185,129,0.08)" filter="url(#glow)"/>
+          <text x="50" y="58" text-anchor="middle" font-family="Orbitron, sans-serif" font-size="30" font-weight="900" fill="#00ff88" filter="url(#glow)">1</text>
+          <line x1="14" y1="50" x2="86" y2="50" stroke="#00f0ff" stroke-width="1" opacity="0.6">
+            <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="4s" repeatCount="indefinite"/>
+          </line>
+        </svg>
+        <div class="header-title">
+          <h1>AEGIS // CORE</h1>
+          <span class="sub">Unlocker Protocol</span>
+        </div>
+      </div>
+      <div class="status-badge" id="systemStatusBadge">
+        <span class="led"></span>
+        <span id="systemStatusText">STATUS: QUANTUM DAEMON ACTIVE</span>
+      </div>
+    </header>
+
+    <!-- Switch de Pestañas -->
+    <div class="tab-switcher">
+      <button class="tab-btn active" data-tab="code" id="tabCode">
+        <span class="tab-num">[01]</span> EMPAREJAMIENTO POR CÓDIGO
+      </button>
+      <button class="tab-btn" data-tab="qr" id="tabQR">
+        <span class="tab-num">[02]</span> HOLOGRÁFICO MATRIX (QR)
+      </button>
+    </div>
+
+    <!-- Contenedor Principal -->
+    <div class="panel-container">
+      <!-- Panel A: Código de 8 Dígitos -->
+      <div class="panel active glass-panel" id="panelCode">
+        <div class="panel-title">ENLACE SEGURO // PROTOCOLO 01</div>
+
+        <div class="input-group">
+          <span class="input-label">NÚMERO TELEFÓNICO</span>
+          <span class="input-prefix">+</span>
+          <input type="tel" class="input-field" id="phoneInput" placeholder="57 300 123 4567" maxlength="18" autocomplete="off">
+          <span class="input-format-badge">E.164</span>
+        </div>
+
+        <button class="btn-primary" id="btnRequestToken">
+          INICIAR ENLACE // SOLICITAR TOKEN
+        </button>
+
+        <div class="code-display-section" id="codeDisplaySection">
+          <div class="code-label">◈ TOKEN DE EMPAREJAMIENTO DE WHATSAPP ◈</div>
+          <div class="code-blocks" id="codeBlocks"></div>
+          <div class="code-actions">
+            <button class="btn-secondary" id="btnCopyCode">COPIAR CÓDIGO</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel B: QR Holográfico -->
+      <div class="panel glass-panel" id="panelQR">
+        <div class="panel-title">HOLOGRÁFICO MATRIX // PROTOCOLO 02</div>
+
+        <div class="qr-scanner-container">
+          <div class="qr-frame">
+            <div class="qr-corner-tl"></div>
+            <div class="qr-corner-tr"></div>
+            <div class="qr-corner-bl"></div>
+            <div class="qr-corner-br"></div>
+            <div class="scan-line"></div>
+            <div class="qr-loading" id="qrLoading">
+              <div class="spinner"></div>
+            </div>
+            <!-- Canvas oficial de renderizado de QR -->
+            <canvas id="qrCanvasTarget"></canvas>
+          </div>
+
+          <button class="btn-refresh" id="btnRefreshQR">
+            REGENERAR TOKEN QR
+          </button>
+        </div>
+      </div>
+
+      <!-- Panel Éxito: Conexión Activa -->
+      <div class="success-panel glass-panel" id="successPanel">
+        <div class="success-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#00ff88" stroke-width="2.5" width="40" height="40">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </div>
+        <div class="success-title">ENLACE ESTABLECIDO // BÓVEDA ACTIVA</div>
+        <div class="success-subtitle">Intercepción y respaldo automático a tu chat privado</div>
+        <div class="vault-activity">
+          <div class="activity-item">
+            <div class="activity-text">
+              <div class="label">Estado de enlace</div>
+              <div class="value">Sesión vinculada exitosamente</div>
+            </div>
+            <div class="activity-status">ONLINE</div>
+          </div>
+          <div class="activity-item">
+            <div class="activity-text">
+              <div class="label">Canal de entrega</div>
+              <div class="value">Mensajes contigo mismo</div>
+            </div>
+            <div class="activity-status">ACTIVO</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast">◈ CÓDIGO COPIADO AL PORTAPAPELES ◈</div>
+
+  <script>
+    (function() {
+      'use strict';
+
+      // 1. INICIALIZAR SOCKET.IO
+      const socket = typeof io !== 'undefined' ? io() : null;
+
+      // 2. CANVAS DE PARTÍCULAS
+      const canvas = document.getElementById('particle-canvas');
+      const ctx = canvas.getContext('2d');
+      let particles = [];
+      let mouse = { x: -1000, y: -1000 };
+
+      function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      }
+
+      function createParticles() {
+        const count = Math.min(60, Math.floor(window.innerWidth / 20));
+        particles = [];
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            vx: (Math.random() - 0.5) * 0.4,
+            vy: (Math.random() - 0.5) * 0.4,
+            radius: Math.random() * 1.5 + 0.4,
+            opacity: Math.random() * 0.5 + 0.15,
+            color: Math.random() > 0.5 ? '#10b981' : '#06b6d4'
+          });
+        }
+      }
+
+      function drawParticles() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < particles.length; i++) {
+          const p = particles[i];
+          p.x += p.vx;
+          p.y += p.vy;
+
+          if (p.x < 0) p.x = canvas.width;
+          if (p.x > canvas.width) p.x = 0;
+          if (p.y < 0) p.y = canvas.height;
+          if (p.y > canvas.height) p.y = 0;
+
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = p.opacity;
+          ctx.fill();
+        }
+        requestAnimationFrame(drawParticles);
+      }
+
+      window.addEventListener('resize', () => { resizeCanvas(); createParticles(); });
+      resizeCanvas();
+      createParticles();
+      drawParticles();
+
+      // 3. CAMBIO DE PESTAÑAS
+      const tabBtns = document.querySelectorAll('.tab-btn');
+      const panelCode = document.getElementById('panelCode');
+      const panelQR = document.getElementById('panelQR');
+      const successPanel = document.getElementById('successPanel');
+
+      function switchTab(tabName) {
+        tabBtns.forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabName));
+        successPanel.classList.remove('visible');
+
+        if (tabName === 'code') {
+          panelCode.classList.add('active');
+          panelQR.classList.remove('active');
+        } else {
+          panelCode.classList.remove('active');
+          panelQR.classList.add('active');
+          pedirQRSocket();
+        }
+      }
+
+      tabBtns.forEach(btn => {
+        btn.addEventListener('click', function() {
+          switchTab(this.dataset.tab);
+        });
+      });
+
+      // 4. TOAST Y AUDIO
+      const toast = document.getElementById('toast');
+      function showToast(msg) {
+        toast.textContent = msg;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 2800);
+      }
+
+      let audioCtx = null;
+      function playTone(freq, dur) {
+        try {
+          if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          if (audioCtx.state === 'suspended') audioCtx.resume();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.04, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start();
+          osc.stop(audioCtx.currentTime + dur);
+        } catch (_) {}
+      }
+
+      // 5. SOLICITUD DE CÓDIGO DE 8 DÍGITOS AL SERVIDOR
+      const phoneInput = document.getElementById('phoneInput');
+      const btnRequest = document.getElementById('btnRequestToken');
+      const codeDisplay = document.getElementById('codeDisplaySection');
+      const codeBlocks = document.getElementById('codeBlocks');
+      let currentCode = '';
+
+      btnRequest.addEventListener('click', () => {
+        const raw = phoneInput.value.replace(/[^0-9]/g, '');
+        if (raw.length < 8) {
+          showToast('⚠ INGRESA UN NÚMERO VÁLIDO CON CÓDIGO DE PAÍS');
+          return;
+        }
+
+        btnRequest.disabled = true;
+        btnRequest.innerText = 'GENERANDO SESIÓN...';
+        playTone(700, 0.1);
+
+        if (socket) {
+          socket.emit('iniciar_con_codigo', { phoneNumber: raw });
+        }
+      });
+
+      document.getElementById('btnCopyCode').addEventListener('click', () => {
+        if (!currentCode) return;
+        navigator.clipboard.writeText(currentCode).then(() => {
+          showToast('◈ CÓDIGO COPIADO AL PORTAPAPELES ◈');
+          playTone(1000, 0.08);
+        });
+      });
+
+      // 6. SOLICITUD DE QR AL SERVIDOR
+      const qrLoading = document.getElementById('qrLoading');
+      const btnRefreshQR = document.getElementById('btnRefreshQR');
+
+      function pedirQRSocket() {
+        qrLoading.classList.remove('hidden');
+        if (socket) {
+          socket.emit('iniciar_con_qr');
+        }
+      }
+
+      btnRefreshQR.addEventListener('click', () => {
+        pedirQRSocket();
+      });
+
+      // 7. RESPUESTAS DESDE EL SERVIDOR (SOCKET.IO)
+      if (socket) {
+        // Código de 8 caracteres recibido de Baileys
+        socket.on('pairing_code', ({ code }) => {
+          btnRequest.disabled = false;
+          btnRequest.innerText = 'INICIAR ENLACE // SOLICITAR TOKEN';
+          currentCode = code;
+
+          codeBlocks.innerHTML = '';
+          for (let i = 0; i < code.length; i++) {
+            const b = document.createElement('div');
+            b.className = 'code-block';
+            b.innerText = code[i];
+            codeBlocks.appendChild(b);
+          }
+          codeDisplay.classList.add('visible');
+          showToast('◈ TOKEN GENERADO. INTRODÚCELO EN TU WHATSAPP ◈');
+          playTone(880, 0.15);
+        });
+
+        // Código QR real recibido de Baileys
+        socket.on('qr_code', ({ qr }) => {
+          qrLoading.classList.add('hidden');
+          const canvasTarget = document.getElementById('qrCanvasTarget');
+          QRCode.toCanvas(canvasTarget, qr, {
+            width: 200,
+            margin: 1,
+            color: { dark: '#030712', light: '#ffffff' }
+          });
+          playTone(920, 0.1);
+        });
+
+        // Confirmación de WhatsApp enlazado
+        socket.on('status', ({ status }) => {
+          if (status === 'connected') {
+            panelCode.classList.remove('active');
+            panelQR.classList.remove('active');
+            document.querySelector('.tab-switcher').style.display = 'none';
+            successPanel.classList.add('visible');
+            document.getElementById('systemStatusText').innerText = 'STATUS: VAULT LINKED';
+            showToast('✅ ENLACE ESTABLECIDO // BÓVEDA ACTIVA');
+            playTone(523, 0.15);
+            setTimeout(() => playTone(659, 0.15), 150);
+            setTimeout(() => playTone(783, 0.25), 300);
+          }
+        });
+
+        socket.on('error_msg', ({ message }) => {
+          showToast('❌ ' + (message || 'ERROR DE CONEXIÓN'));
+          btnRequest.disabled = false;
+          btnRequest.innerText = 'INICIAR ENLACE // SOLICITAR TOKEN';
+          qrLoading.classList.add('hidden');
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
