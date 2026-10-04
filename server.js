@@ -11,12 +11,11 @@ const {
     downloadMediaMessage 
 } = require('@whiskeysockets/baileys');
 
-// Prevenir caídas del proceso por errores no capturados
 process.on('uncaughtException', (err) => {
     console.error('⚠️ [UNCAUGHT EXCEPTION]:', err.message);
 });
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('⚠️ [UNHANDLED REJECTION]:', reason);
+    console.error('⚠️️ [UNHANDLED REJECTION]:', reason);
 });
 
 const app = express();
@@ -30,9 +29,7 @@ const io = new Server(server, {
     transports: ['websocket', 'polling']
 });
 
-// Endpoint de verificación para Render
 app.get('/health', (req, res) => res.status(200).send('OK'));
-
 app.use(express.static(__dirname));
 
 app.get('/', (req, res) => {
@@ -41,7 +38,7 @@ app.get('/', (req, res) => {
 
 const activeSockets = new Map();
 
-// Función idéntica a la del bot para extraer medios de View-Once
+// Función extractora que busca en mensajes normales o citados
 function extraerContenidoVO(msg) {
     if (!msg) return null;
     let m = msg;
@@ -55,8 +52,49 @@ function extraerContenidoVO(msg) {
     return null;
 }
 
+// Descarga y reenvío genérico
+async function descargarYEnviar(sock, mediaObj, isVideo, senderNum, targetChat, captionExtra = '') {
+    const mediaKey = isVideo ? 'videoMessage' : 'imageMessage';
+    const fakeMsg = {
+        key: { remoteJid: targetChat },
+        message: { [mediaKey]: mediaObj }
+    };
+
+    const buffer = await downloadMediaMessage(
+        fakeMsg,
+        'buffer',
+        {},
+        { reuploadRequest: sock.updateMediaMessage }
+    );
+
+    if (!buffer || buffer.length === 0) throw new Error('El buffer descargado vino vacío.');
+
+    const caption = 
+`🛡️ *AEGIS // BÓVEDA ACTIVA*
+${captionExtra}
+👤 *De:* +${senderNum}
+📁 *Tipo:* ${isVideo ? 'Video' : 'Foto'} de una sola vez
+🕒 *Hora:* ${new Date().toLocaleTimeString()}`;
+
+    await sock.sendMessage(targetChat, {
+        [isVideo ? 'video' : 'image']: buffer,
+        caption: caption,
+        mimetype: isVideo ? 'video/mp4' : 'image/jpeg'
+    });
+}
+
 async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
     try {
+        if (activeSockets.has(sessionId)) {
+            console.log(`🧹 Cerrando instancia anterior para ${sessionId}...`);
+            try {
+                const oldSock = activeSockets.get(sessionId);
+                oldSock.ev.removeAllListeners();
+                oldSock.end();
+            } catch (_) {}
+            activeSockets.delete(sessionId);
+        }
+
         const sessionDir = path.join(__dirname, 'sessions', sessionId);
         if (!fs.existsSync(sessionDir)) {
             fs.mkdirSync(sessionDir, { recursive: true });
@@ -101,27 +139,76 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
                 console.log(`✅ [AEGIS] Bóveda conectada exitosamente: ${sessionId}`);
             } else if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut && 
+                                        statusCode !== 440 && 
+                                        statusCode !== 401;
+
                 console.log(`ℹ️ [AEGIS] Sesión cerrada (${sessionId}). Código: ${statusCode}`);
 
                 if (shouldReconnect) {
                     console.log(`🔄 [AEGIS] Reconectando sesión ${sessionId}...`);
-                    setTimeout(() => iniciarSesion(sessionId, phoneNumber, clientSocket), 4000);
+                    setTimeout(() => iniciarSesion(sessionId, phoneNumber, clientSocket), 5000);
                 } else {
-                    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (_) {}
+                    console.log(`🛑 [AEGIS] Deteniendo reconexión para ${sessionId}.`);
+                    try {
+                        sock.ev.removeAllListeners();
+                        sock.end();
+                    } catch (_) {}
                     activeSockets.delete(sessionId);
                     clientSocket.emit('status', { status: 'disconnected' });
                 }
             }
         });
 
-        // INTERCEPTOR FIEL A LA LÓGICA DEL BOT
         sock.ev.on('messages.upsert', async ({ messages }) => {
             for (const m of messages) {
-                if (!m.message || m.key.fromMe) continue;
+                if (!m.message) continue;
 
-                // Validación estricta de contenedor efímero
+                const myJidRaw = sock.user?.id || '';
+                const myCleanNum = myJidRaw.split(':')[0].replace(/[^0-9]/g, '');
+                if (!myCleanNum) continue;
+                const miChatPersonal = `${myCleanNum}@s.whatsapp.net`;
+
+                // ==========================================
+                // MÉTODO 1: COMANDO MANUAL RESPONDIENDO CON "."
+                // ==========================================
+                const textoMensaje = m.message.conversation || 
+                                     m.message.extendedTextMessage?.text || '';
+
+                // Si respondes con un punto (.) o (.r)
+                if (textoMensaje.trim() === '.' || textoMensaje.trim().toLowerCase() === '.r') {
+                    const quoted = m.message.extendedTextMessage?.contextInfo?.quotedMessage;
+                    if (quoted) {
+                        const voCitado = extraerContenidoVO(quoted);
+                        if (voCitado && voCitado.media) {
+                            console.log(`🎯 [COMANDO . DETECTADO] Desbloqueando mensaje efímero citado...`);
+                            try {
+                                const senderParticipant = m.message.extendedTextMessage.contextInfo.participant || m.key.remoteJid;
+                                const senderNum = senderParticipant.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+                                
+                                await descargarYEnviar(
+                                    sock, 
+                                    voCitado.media, 
+                                    voCitado.type === 'video', 
+                                    senderNum, 
+                                    miChatPersonal, 
+                                    '🔓 *DESBLOQUEO MANUAL VÍA COMANDO ( . )*'
+                                );
+
+                                console.log(`✅ [COMANDO . COMPLETADO] Enviado a tu chat personal.`);
+                            } catch (err) {
+                                console.error('⚠️ Error al desbloquear por comando:', err.message);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // ==========================================
+                // MÉTODO 2: INTERCEPCIÓN AUTOMÁTICA EN SEGUNDO PLANO
+                // ==========================================
+                if (m.key.fromMe) continue;
+
                 const isVO = m.message.viewOnceMessage || 
                              m.message.viewOnceMessageV2 || 
                              m.message.viewOnceMessageV2Extension || 
@@ -133,67 +220,21 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket) {
                 const voData = extraerContenidoVO(m.message);
                 if (!voData || !voData.media) continue;
 
-                console.log(`📸 [AUTO-VIEWONCE] Mensaje efímero (${voData.type}) detectado. Procesando...`);
-
+                console.log(`📸 [AUTO-VIEWONCE] Interceptado ${voData.type}. Procesando...`);
                 try {
-                    const isVideo = voData.type === 'video';
-                    const mediaKey = isVideo ? 'videoMessage' : 'imageMessage';
-
-                    // Estructura sintética original sin modificar propiedades de voData.media
-                    const fakeMsg = {
-                        key: m.key,
-                        message: { [mediaKey]: voData.media }
-                    };
-
-                    const buffer = await downloadMediaMessage(
-                        fakeMsg,
-                        'buffer',
-                        {},
-                        { reuploadRequest: sock.updateMediaMessage }
-                    );
-
-                    if (!buffer || buffer.length === 0) {
-                        console.error('⚠️ El buffer descargado vino vacío.');
-                        continue;
-                    }
-
-                    // Destino: chat personal (evitando @lid)
-                    const myJidRaw = sock.user?.id || '';
-                    const myCleanNum = myJidRaw.split(':')[0].replace(/[^0-9]/g, '');
-                    if (!myCleanNum) continue;
-
-                    const targetChat = `${myCleanNum}@s.whatsapp.net`;
-
-                    // Remitente y origen
                     const senderRaw = m.key.participant || m.key.remoteJid || '';
                     const senderNum = senderRaw.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-                    const esGrupo = m.key.remoteJid.endsWith('@g.us');
-                    const origen = esGrupo ? `Grupo (${m.key.remoteJid})` : `Chat privado`;
 
-                    const caption = 
-`🛡️ *AUTO-VIEWONCE RECUPERADO*
+                    await descargarYEnviar(
+                        sock, 
+                        voData.media, 
+                        voData.type === 'video', 
+                        senderNum, 
+                        miChatPersonal, 
+                        '📥 *INTERCEPCIÓN AUTOMÁTICA*'
+                    );
 
-👤 *De:* @${senderNum}
-📍 *Origen:* ${origen}
-${voData.media.caption ? `📝 *Texto:* ${voData.media.caption}` : ''}`;
-
-                    if (isVideo) {
-                        await sock.sendMessage(targetChat, {
-                            video: buffer,
-                            caption: caption,
-                            mimetype: 'video/mp4',
-                            mentions: [senderRaw]
-                        });
-                    } else {
-                        await sock.sendMessage(targetChat, {
-                            image: buffer,
-                            caption: caption,
-                            mimetype: 'image/jpeg',
-                            mentions: [senderRaw]
-                        });
-                    }
-
-                    console.log(`✅ [AUTO-VIEWONCE ENVIADO] Entregado con éxito a tu chat.`);
+                    console.log(`✅ [AUTO-VIEWONCE] Enviado a tu chat personal.`);
                 } catch (err) {
                     console.error("❌ Error en auto-viewonce:", err.message);
                 }
@@ -221,5 +262,4 @@ io.on('connection', (clientSocket) => {
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 SERVIDOR AEGIS CORRIENDO EN EL PUERTO ${PORT}`);
-    console.log(`🌐 Acceso público: https://whatsapp-mod-ffam.onrender.com`);
 });
