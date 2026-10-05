@@ -12,7 +12,7 @@ const {
     jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 
-// Captura de errores globales para evitar que el proceso muera inesperadamente
+// Protección ante excepciones para evitar cierres del proceso en Render
 process.on('uncaughtException', (err) => console.error('⚠️ [EXCEPCIÓN NO CONTROLADA]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('⚠️ [RECHAZO NO CONTROLADO]:', reason));
 
@@ -23,12 +23,12 @@ const io = new Server(server, {
     transports: ['websocket', 'polling']
 });
 
-// Endpoint para mantener vivo el servicio en Render con cron-job / uptimerobot
+// Endpoint de mantenimiento para cron-job / UptimeRobot
 app.get('/health', (req, res) => res.status(200).send('OK'));
 app.use(express.static(__dirname));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
-// Carpetas para persistir datos y sesiones
+// Estructura de persistencia en disco
 const DATA_DIR = path.join(__dirname, 'data');
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -46,7 +46,7 @@ function guardarConfig(data) {
     try {
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2));
     } catch (err) {
-        console.error('Error guardando configuración:', err.message);
+        console.error('Error al guardar configuración:', err.message);
     }
 }
 
@@ -59,7 +59,7 @@ const sessionStartTimes = new Map();
 const messageStore = new Map();
 const msgRetryCounterMap = new Map();
 
-// Helper para extraer contenido de View-Once
+// Extractor unificado de formatos View-Once (v1, v2 y efímeros)
 function extraerContenidoVO(msg) {
     if (!msg) return null;
     let m = msg;
@@ -73,7 +73,7 @@ function extraerContenidoVO(msg) {
     return null;
 }
 
-// Descarga el archivo de medios y lo redirige al número receptor externo
+// Descarga y reenvío con handshake previo para evitar el cartel "Esperando mensaje"
 async function descargarYEnviar(sock, mediaObj, isVideo, senderNum, targetChat, captionExtra = '') {
     const mediaKey = isVideo ? 'videoMessage' : 'imageMessage';
     const fakeMsg = {
@@ -88,7 +88,7 @@ async function descargarYEnviar(sock, mediaObj, isVideo, senderNum, targetChat, 
         { reuploadRequest: sock.updateMediaMessage }
     );
 
-    if (!buffer || buffer.length === 0) throw new Error('El archivo descargado está vacío.');
+    if (!buffer || buffer.length === 0) throw new Error('El buffer descargado está vacío.');
 
     const caption = 
 `🛡️ *AEGIS // BÓVEDA ACTIVA*
@@ -97,6 +97,17 @@ ${captionExtra}
 📁 *Tipo:* ${isVideo ? 'Video' : 'Foto'} de una sola vez
 🕒 *Hora:* ${new Date().toLocaleTimeString()}`;
 
+    // 1. Mensaje de control previo: inicializa el túnel de claves Signal en el chat de destino
+    try {
+        await sock.sendMessage(targetChat, { 
+            text: `🔓 *PROCESANDO DESBLOQUEO...*\nRecibiendo archivo de +${senderNum}` 
+        });
+    } catch (_) {}
+
+    // Pausa técnica para permitir la negociación criptográfica
+    await new Promise(resolve => setTimeout(resolve, 600));
+
+    // 2. Envío del archivo descifrado
     const sent = await sock.sendMessage(targetChat, {
         [isVideo ? 'video' : 'image']: buffer,
         caption: caption,
@@ -148,7 +159,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
         activeSockets.set(sessionId, sock);
         sock.ev.on('creds.update', saveCreds);
 
-        // Generar código de emparejamiento (Pairing Code) si es sesión nueva por teléfono
+        // Solicitud de código de vinculación telefónico
         if (phoneNumber && !sock.authState.creds.registered) {
             if (clientSocket) {
                 clientSocket.emit('sync_progress', { percent: 50, statusText: 'Solicitando código de WhatsApp...' });
@@ -169,7 +180,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
             }, 3000);
         }
 
-        // Eventos de estado de conexión
+        // Control de eventos de conexión
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
@@ -184,7 +195,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                     clientSocket.emit('status', { status: 'connected', startTime: sessionStartTimes.get(sessionId) });
                     clientSocket.emit('toast_msg', { message: 'WhatsApp vinculado exitosamente', type: 'success' });
                 }
-                console.log(`✅ [AEGIS] Sesión en línea y permanente: ${sessionId}`);
+                console.log(`✅ [AEGIS] Sesión vinculada y activa: ${sessionId}`);
             } else if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
@@ -206,25 +217,24 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                     delete configuraciones[sessionId];
                     guardarConfig(configuraciones);
                     if (clientSocket) {
-                        clientSocket.emit('status', { status: 'disconnected', message: 'Sesión desvinculada o cerrada.' });
-                        clientSocket.emit('toast_msg', { message: 'Sesión finalizada', type: 'error' });
+                        clientSocket.emit('status', { status: 'disconnected', message: 'Sesión finalizada.' });
+                        clientSocket.emit('toast_msg', { message: 'Sesión desconectada', type: 'error' });
                     }
                 }
             }
         });
 
-        // Intercepción de mensajes
+        // Receptor de mensajes
         sock.ev.on('messages.upsert', async ({ messages }) => {
             for (const m of messages) {
                 if (!m.message) continue;
 
-                // Destino: si hay número receptor configurado va a ese chat, de lo contrario al chat actual
                 const userConf = configuraciones[sessionId] || {};
                 const receptorFinal = userConf.targetNumber 
                     ? `${userConf.targetNumber}@s.whatsapp.net` 
                     : m.key.remoteJid;
 
-                // 1. Comando manual de respuesta con "." o ".r"
+                // 1. Comando manual mediante respuesta (.) o (.r)
                 const textoMensaje = m.message.conversation || m.message.extendedTextMessage?.text || '';
                 if (textoMensaje.trim() === '.' || textoMensaje.trim().toLowerCase() === '.r') {
                     const quoted = m.message.extendedTextMessage?.contextInfo?.quotedMessage;
@@ -246,9 +256,9 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                                 if (clientSocket) {
                                     clientSocket.emit('toast_msg', { message: `Archivo reenviado a +${receptorFinal.split('@')[0]}`, type: 'success' });
                                 }
-                                console.log(`✅ [AEGIS] Desbloqueo manual enviado a: ${receptorFinal}`);
+                                console.log(`✅ [AEGIS] Desbloqueo manual entregado a: ${receptorFinal}`);
                             } catch (err) {
-                                console.error('Error al desbloquear por comando:', err.message);
+                                console.error('Error en desbloqueo por comando:', err.message);
                                 if (clientSocket) clientSocket.emit('toast_msg', { message: 'Error procesando comando: ' + err.message, type: 'error' });
                             }
                             continue;
@@ -256,7 +266,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                     }
                 }
 
-                // 2. Intercepción automática de fotos o videos efímeros
+                // 2. Intercepción automática de mensajes efímeros
                 if (m.key.fromMe) continue;
 
                 const isVO = m.message.viewOnceMessage || 
@@ -285,7 +295,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                     if (clientSocket) {
                         clientSocket.emit('toast_msg', { message: `Foto efímera interceptada y enviada a +${receptorFinal.split('@')[0]}`, type: 'success' });
                     }
-                    console.log(`✅ [AEGIS] Auto-captura enviada a: ${receptorFinal}`);
+                    console.log(`✅ [AEGIS] Auto-captura entregada a: ${receptorFinal}`);
                 } catch (err) {
                     console.error('Error en captura automática:', err.message);
                     if (clientSocket) clientSocket.emit('toast_msg', { message: 'Fallo al interceptar: ' + err.message, type: 'error' });
@@ -299,10 +309,10 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
     }
 }
 
-// Handlers de Socket.IO comunicados con index.html
+// Handlers de Socket.io conectados con index.html
 io.on('connection', (clientSocket) => {
 
-    // Comprobar estado de la sesión según el UID de Google
+    // Comprobar estado de la sesión por UID
     clientSocket.on('check_user_session', ({ uid }) => {
         const sessionId = `uid_${uid || 'anon'}`;
         const conf = configuraciones[sessionId] || {};
@@ -316,7 +326,7 @@ io.on('connection', (clientSocket) => {
         });
     });
 
-    // Iniciar vinculación mediante número
+    // Iniciar vinculación con número primario + receptor
     clientSocket.on('vincular_dispositivo', ({ uid, linkedNumber, targetNumber }) => {
         const cleanLinked = (linkedNumber || '').replace(/[^0-9]/g, '');
         const cleanTarget = (targetNumber || '').replace(/[^0-9]/g, '');
@@ -328,17 +338,17 @@ io.on('connection', (clientSocket) => {
         };
         guardarConfig(configuraciones);
 
-        clientSocket.emit('sync_progress', { percent: 10, statusText: 'Conectando túnel WebSocket...' });
+        clientSocket.emit('sync_progress', { percent: 10, statusText: 'Iniciando enlace con WhatsApp...' });
         iniciarSesion(sessionId, cleanLinked, clientSocket);
     });
 
-    // Iniciar vinculación mediante código QR
+    // Iniciar vinculación vía QR
     clientSocket.on('iniciar_con_qr', ({ uid }) => {
         const sessionId = `uid_${uid || 'anon'}`;
         iniciarSesion(sessionId, null, clientSocket);
     });
 
-    // Diagnóstico en vivo: Envía un mensaje de prueba al receptor asignado
+    // Diagnóstico en vivo (Ping Test)
     clientSocket.on('probar_conexion', async ({ uid }) => {
         const startTime = Date.now();
         const sessionId = `uid_${uid || 'anon'}`;
@@ -346,13 +356,13 @@ io.on('connection', (clientSocket) => {
 
         if (!conf || !conf.targetNumber) {
             clientSocket.emit('ping_result', { ok: false });
-            return clientSocket.emit('toast_msg', { message: 'No tienes configurado un número receptor.', type: 'warn' });
+            return clientSocket.emit('toast_msg', { message: 'No hay número receptor registrado', type: 'warn' });
         }
 
         const sock = activeSockets.get(sessionId);
         if (!sock || !sock.user) {
             clientSocket.emit('ping_result', { ok: false });
-            return clientSocket.emit('toast_msg', { message: 'El WhatsApp enlazado no está en línea.', type: 'error' });
+            return clientSocket.emit('toast_msg', { message: 'El WhatsApp enlazado no está en línea', type: 'error' });
         }
 
         try {
@@ -390,7 +400,7 @@ io.on('connection', (clientSocket) => {
     });
 });
 
-// Restaurar sesiones existentes cuando Render se despierta o se reinicia el contenedor
+// Restauración de sesiones guardadas al reiniciar el servidor en Render
 function restaurarSesionesGuardadas() {
     const ids = Object.keys(configuraciones);
     if (ids.length === 0) return;
