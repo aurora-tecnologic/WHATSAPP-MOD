@@ -12,7 +12,7 @@ const {
     jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 
-// Protección ante excepciones para evitar cierres del proceso en Render
+// Prevenir caídas no deseadas del servidor
 process.on('uncaughtException', (err) => console.error('⚠️ [EXCEPCIÓN NO CONTROLADA]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('⚠️ [RECHAZO NO CONTROLADO]:', reason));
 
@@ -23,18 +23,41 @@ const io = new Server(server, {
     transports: ['websocket', 'polling']
 });
 
-// Endpoint de mantenimiento para cron-job / UptimeRobot
-app.get('/health', (req, res) => res.status(200).send('OK'));
-app.use(express.static(__dirname));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-
-// Estructura de persistencia en disco
+// Rutas de almacenamiento
 const DATA_DIR = path.join(__dirname, 'data');
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 
 const CONFIG_FILE = path.join(DATA_DIR, 'configs.json');
+
+// Mantenimiento de Render (cron-job)
+app.get('/health', (req, res) => res.status(200).send('OK'));
+
+// Ruta para reiniciar y limpiar sesiones sin requerir acceso Shell de pago
+app.get('/reset-sessions', (req, res) => {
+    try {
+        if (fs.existsSync(SESSIONS_DIR)) {
+            fs.rmSync(SESSIONS_DIR, { recursive: true, force: true });
+            fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+        }
+        if (fs.existsSync(CONFIG_FILE)) {
+            fs.rmSync(CONFIG_FILE, { force: true });
+        }
+        configuraciones = {};
+        for (const [id, s] of activeSockets.entries()) {
+            try { s.logout(); s.end(); } catch (_) {}
+        }
+        activeSockets.clear();
+        sessionStartTimes.clear();
+        res.send('✅ Sesiones y configuraciones borradas con éxito. Ya puedes volver a vincular.');
+    } catch (err) {
+        res.status(500).send('Error limpiando sesiones: ' + err.message);
+    }
+});
+
+app.use(express.static(__dirname));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 function leerConfig() {
     try {
@@ -59,7 +82,7 @@ const sessionStartTimes = new Map();
 const messageStore = new Map();
 const msgRetryCounterMap = new Map();
 
-// Extractor unificado de formatos View-Once (v1, v2 y efímeros)
+// Extractor de mensajes View-Once
 function extraerContenidoVO(msg) {
     if (!msg) return null;
     let m = msg;
@@ -73,7 +96,7 @@ function extraerContenidoVO(msg) {
     return null;
 }
 
-// Descarga y reenvío con handshake previo para evitar el cartel "Esperando mensaje"
+// Descarga y reenvío con handshake previo para erradicar el error de espera
 async function descargarYEnviar(sock, mediaObj, isVideo, senderNum, targetChat, captionExtra = '') {
     const mediaKey = isVideo ? 'videoMessage' : 'imageMessage';
     const fakeMsg = {
@@ -97,17 +120,16 @@ ${captionExtra}
 📁 *Tipo:* ${isVideo ? 'Video' : 'Foto'} de una sola vez
 🕒 *Hora:* ${new Date().toLocaleTimeString()}`;
 
-    // 1. Mensaje de control previo: inicializa el túnel de claves Signal en el chat de destino
+    // 1. Handshake de texto previo para abrir la sesión Signal con el receptor
     try {
         await sock.sendMessage(targetChat, { 
             text: `🔓 *PROCESANDO DESBLOQUEO...*\nRecibiendo archivo de +${senderNum}` 
         });
     } catch (_) {}
 
-    // Pausa técnica para permitir la negociación criptográfica
     await new Promise(resolve => setTimeout(resolve, 600));
 
-    // 2. Envío del archivo descifrado
+    // 2. Envío del archivo ya descifrado
     const sent = await sock.sendMessage(targetChat, {
         [isVideo ? 'video' : 'image']: buffer,
         caption: caption,
@@ -120,7 +142,7 @@ ${captionExtra}
     }
 }
 
-// Inicialización de la sesión Baileys
+// Inicializar sesión en Baileys
 async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null) {
     try {
         if (reconnectTimers.has(sessionId)) {
@@ -159,7 +181,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
         activeSockets.set(sessionId, sock);
         sock.ev.on('creds.update', saveCreds);
 
-        // Solicitud de código de vinculación telefónico
+        // Generar código de vinculación telefónico
         if (phoneNumber && !sock.authState.creds.registered) {
             if (clientSocket) {
                 clientSocket.emit('sync_progress', { percent: 50, statusText: 'Solicitando código de WhatsApp...' });
@@ -180,7 +202,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
             }, 3000);
         }
 
-        // Control de eventos de conexión
+        // Actualizaciones de conexión
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
@@ -195,7 +217,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                     clientSocket.emit('status', { status: 'connected', startTime: sessionStartTimes.get(sessionId) });
                     clientSocket.emit('toast_msg', { message: 'WhatsApp vinculado exitosamente', type: 'success' });
                 }
-                console.log(`✅ [AEGIS] Sesión vinculada y activa: ${sessionId}`);
+                console.log(`✅ [AEGIS] Sesión vinculada: ${sessionId}`);
             } else if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
@@ -224,7 +246,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
             }
         });
 
-        // Receptor de mensajes
+        // Intercepción de mensajes
         sock.ev.on('messages.upsert', async ({ messages }) => {
             for (const m of messages) {
                 if (!m.message) continue;
@@ -234,7 +256,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                     ? `${userConf.targetNumber}@s.whatsapp.net` 
                     : m.key.remoteJid;
 
-                // 1. Comando manual mediante respuesta (.) o (.r)
+                // 1. Comando manual mediante respuesta con punto
                 const textoMensaje = m.message.conversation || m.message.extendedTextMessage?.text || '';
                 if (textoMensaje.trim() === '.' || textoMensaje.trim().toLowerCase() === '.r') {
                     const quoted = m.message.extendedTextMessage?.contextInfo?.quotedMessage;
@@ -266,7 +288,7 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
                     }
                 }
 
-                // 2. Intercepción automática de mensajes efímeros
+                // 2. Intercepción automática de imágenes o videos efímeros
                 if (m.key.fromMe) continue;
 
                 const isVO = m.message.viewOnceMessage || 
@@ -309,10 +331,10 @@ async function iniciarSesion(sessionId, phoneNumber = null, clientSocket = null)
     }
 }
 
-// Handlers de Socket.io conectados con index.html
+// Handlers de Socket.io conectados con la página
 io.on('connection', (clientSocket) => {
 
-    // Comprobar estado de la sesión por UID
+    // Comprobar estado por UID
     clientSocket.on('check_user_session', ({ uid }) => {
         const sessionId = `uid_${uid || 'anon'}`;
         const conf = configuraciones[sessionId] || {};
@@ -379,7 +401,7 @@ io.on('connection', (clientSocket) => {
         }
     });
 
-    // Desvinculación manual desde la página web
+    // Desvinculación manual
     clientSocket.on('desvincular_dispositivo', ({ uid }) => {
         const sessionId = `uid_${uid || 'anon'}`;
         if (activeSockets.has(sessionId)) {
@@ -400,7 +422,7 @@ io.on('connection', (clientSocket) => {
     });
 });
 
-// Restauración de sesiones guardadas al reiniciar el servidor en Render
+// Reanudar sesiones persistentes tras suspensión de Render
 function restaurarSesionesGuardadas() {
     const ids = Object.keys(configuraciones);
     if (ids.length === 0) return;
